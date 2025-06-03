@@ -2,6 +2,7 @@ import torch
 import gymnasium as gym
 from typing import Dict, List, Tuple, Optional
 
+from omni.isaac.lab.utils import configclass # Added import
 from omni.isaac.lab.envs import RLTask, RLTaskCfg
 from omni.isaac.lab.assets import Robot, RobotCfg, AssetCfg
 from omni.isaac.lab.sim import SimulationContext, schemas as sim_schemas
@@ -16,17 +17,34 @@ from omni.isaac.lab.utils.assets import NVIDIA_ASSETS_DIR # For potential fallba
 from torch import Tensor
 
 @configclass
-class H1ObsScalesCfg:
-    """Observation scales for H1 environment."""
+class RobotParamsCfg:
+    """Configuration container for robot-specific parameters."""
+    name: str # e.g., "h1", "g1"
+    urdf_path: str
+    num_actions: int
+    num_observations: int
+    action_scale: float
+    default_joint_angles: Dict[str, float]
+    joint_names_for_actions: List[str] # Order matters for actions
+    stiffness: Dict[str, float] # Per-joint stiffness or a single value for all
+    damping: Dict[str, float] # Per-joint damping or a single value for all
+    base_height_target: float
+    contact_sensor_prim_names_and_paths: Dict[str, str] # e.g., {"left_foot": "/left_ankle_roll_link", ...}
+    early_termination_base_height_lower_limit: float
+    early_termination_base_contact_prim_paths: List[str] # Prims that trigger termination on contact
+
+@configclass
+class ObsScalesCfg: # Renamed from H1ObsScalesCfg
+    """Observation scales for the environment.""" # Updated docstring
     lin_vel: float = 2.0
     ang_vel: float = 0.25
     dof_pos: float = 1.0
     dof_vel: float = 0.05
-    # Commands will be scaled by their respective command_scale in H1IsaacLabEnvCfg
+    # Commands will be scaled by their respective command_scale in RobotIsaacLabEnvCfg
 
 @configclass
-class H1RewardScalesCfg:
-    """Reward scales for H1 environment."""
+class RewardScalesCfg: # Renamed from H1RewardScalesCfg
+    """Reward scales for the environment.""" # Updated docstring
     # Locomotion
     tracking_lin_vel: float = 1.5
     tracking_ang_vel: float = 0.5 # Renamed from ang_vel_xy to be more general
@@ -54,22 +72,18 @@ class H1RewardScalesCfg:
 
 
 @configclass
-class H1CommandRangesCfg:
-    """Command ranges for H1 environment."""
+class CommandRangesCfg: # Renamed from H1CommandRangesCfg
+    """Command ranges for the environment.""" # Updated docstring
     lin_vel_x: Tuple[float, float] = (-1.0, 1.0)  # min, max m/s
     lin_vel_y: Tuple[float, float] = (-1.0, 1.0)  # min, max m/s
     ang_vel_yaw: Tuple[float, float] = (-1.0, 1.0)  # min, max rad/s
     heading: Tuple[float, float] = (-torch.pi, torch.pi) # min, max rad
 
-@configclass
-class H1EarlyTerminationConditionsCfg:
-    """Early termination conditions for H1 environment."""
-    base_height_lower_limit: float = 0.15 # m, terminate if base is too low
-    base_contact: bool = True # Terminate if base (non-foot) collides
+# Removed H1EarlyTerminationConditionsCfg as it's no longer used.
 
 @configclass
-class H1IsaacLabEnvCfg(RLTaskCfg):
-    """Configuration for the H1 Isaac Lab environment."""
+class RobotIsaacLabEnvCfg(RLTaskCfg):
+    """Configuration for the Robot Isaac Lab environment."""
     # Basic RL settings
     num_envs: int = 4096 # Default from RLTaskCfg, can be overridden
     # episode_length_s: float = 20.0 # Default from RLTaskCfg
@@ -83,75 +97,33 @@ class H1IsaacLabEnvCfg(RLTaskCfg):
         carrier_material=sim_schemas.RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=1.0, restitution=0.0)
     )
 
-    # H1 Robot specific settings
-    h1_urdf_path: str = "./resources/robots/h1/urdf/h1.urdf" # Relative to repo root
-    num_observations: int = 41 # From H1RoughCfg
-    num_actions: int = 10 # HipYaw, HipRoll, HipPitch, Knee, Ankle for left and right legs
-    action_scale: float = 0.25 # From H1RoughCfg
-
-    # Default joint angles (10 joints: 2x (HipYaw, HipRoll, HipPitch, Knee, Ankle))
-    # Values from H1RoughCfg.init_state.default_joint_angles
-    # LH_HAA, LH_HFE, LH_KFE, LH_ANKLE, RH_HAA, RH_HFE, RH_KFE, RH_ANKLE (Original has 8, H1 URDF has 10)
-    # Let's assume: L_HIP_YAW, L_HIP_ROLL, L_HIP_PITCH, L_KNEE, L_ANKLE_PITCH, (and R_...)
-    # The H1 URDF typically has:
-    # left_hip_yaw_joint, left_hip_roll_joint, left_hip_pitch_joint, left_knee_joint, left_ankle_pitch_joint, left_ankle_roll_joint (6 per leg)
-    # The original legged_gym H1 config uses 8 DoF (no yaw, no ankle roll). The subtask specified 10 actions.
-    # Assuming 10 actions means: L/R HipYaw, HipRoll, HipPitch, Knee, AnklePitch.
-    default_joint_angles: Dict[str, float] = {
-        "left_hip_yaw_joint": 0.0, "left_hip_roll_joint": 0.0, "left_hip_pitch_joint": -0.52, # ~-30 deg
-        "left_knee_joint": 1.05, # ~60 deg
-        "left_ankle_pitch_joint": -0.52, # ~-30 deg
-        "right_hip_yaw_joint": 0.0, "right_hip_roll_joint": 0.0, "right_hip_pitch_joint": -0.52,
-        "right_knee_joint": 1.05,
-        "right_ankle_pitch_joint": -0.52,
-    }
-
-    # PD control gains (stiffness, damping)
-    # From H1RoughCfg.control.stiffness and H1RoughCfg.control.damping
-    # Assuming order matches default_joint_angles if list, or use dict.
-    # Let's use a simplified scheme for now, applying same P/D to all. Isaac Lab RobotCfg handles this better.
-    stiffness: float = 40.0 # Default for all joints, can be a dict
-    damping: float = 1.0   # Default for all joints, can be a dict
+    # Robot parameters to be filled by a specific robot config (e.g. H1, G1)
+    robot_params: RobotParamsCfg = RobotParamsCfg(name="abstract_robot", urdf_path="", num_actions=0, num_observations=0, action_scale=0.0, default_joint_angles={}, joint_names_for_actions=[], stiffness={}, damping={}, base_height_target=0.0, contact_sensor_prim_names_and_paths={}, early_termination_base_height_lower_limit=0.0, early_termination_base_contact_prim_paths=[])
 
     # Observation and Reward scales
-    obs_scales: H1ObsScalesCfg = H1ObsScalesCfg()
-    reward_scales: H1RewardScalesCfg = H1RewardScalesCfg()
-
-    # Base height target for rewards
-    base_height_target: float = 0.42 # m, target CoM height for H1
-
-    # Early termination conditions
-    early_termination: H1EarlyTerminationConditionsCfg = H1EarlyTerminationConditionsCfg()
+    obs_scales: ObsScalesCfg = ObsScalesCfg() # Updated to new name
+    reward_scales: RewardScalesCfg = RewardScalesCfg() # Updated to new name
 
     # Command ranges and scales
-    commands: H1CommandRangesCfg = H1CommandRangesCfg()
+    commands: CommandRangesCfg = CommandRangesCfg() # Updated to new name
     commands_scale: List[float] = [2.0, 2.0, 0.25] # Scales for lin_vel_x, lin_vel_y, ang_vel_yaw commands in obs
 
-    # Contact sensor configuration for feet and base
-    feet_contact_sensor: ContactSensorCfg = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/left_lower_leg_link", # Example, adjust to actual foot prims
-        history_length=3, filter_type="boolean", threshold=0.1,
-        track_air_time=True
-    )
-    # Add more sensors for other feet and base if needed. For now, one for simplicity in config.
-    # Will define multiple sensors in the Env class.
 
+class RobotIsaacLabEnv(RLTask): # Renamed from H1IsaacLabEnv
+    """Isaac Lab environment for a generic robot, designed for RL.""" # Updated docstring
 
-class H1IsaacLabEnv(RLTask):
-    """Isaac Lab environment for H1 Humanoid robot, designed for RL."""
+    cfg: RobotIsaacLabEnvCfg # Environment configuration type hint is already RobotIsaacLabEnvCfg
 
-    cfg: H1IsaacLabEnvCfg # Environment configuration
-
-    def __init__(self, cfg: H1IsaacLabEnvCfg, sim_params: sim_schemas.SimCfg = None, **kwargs):
+    def __init__(self, cfg: RobotIsaacLabEnvCfg, sim_params: sim_schemas.SimCfg = None, **kwargs):
         self.cfg = cfg # Store the configuration
 
         # Initialize RLTask
         super().__init__(cfg=cfg, sim_params=sim_params, **kwargs)
 
-        # Robot specific parameters
-        self.action_scale = self.cfg.action_scale
-        self.num_observation_dims = self.cfg.num_observations
-        self.num_action_dims = self.cfg.num_actions
+        # Robot specific parameters will now come from cfg.robot_params
+        self.action_scale = self.cfg.robot_params.action_scale
+        self.num_observation_dims = self.cfg.robot_params.num_observations
+        self.num_action_dims = self.cfg.robot_params.num_actions
 
         # Observation and action spaces
         self.observation_space = gym.spaces.Box(
@@ -165,10 +137,9 @@ class H1IsaacLabEnv(RLTask):
         # The order of joints in self.robot.meta_info.joint_names will be the source of truth
         # This conversion will be done in _setup_scene after robot is loaded.
         self.default_joint_angles_tensor: Optional[Tensor] = None
-        self.joint_names_for_actions: List[str] = [
-            "left_hip_yaw_joint", "left_hip_roll_joint", "left_hip_pitch_joint", "left_knee_joint", "left_ankle_pitch_joint",
-            "right_hip_yaw_joint", "right_hip_roll_joint", "right_hip_pitch_joint", "right_knee_joint", "right_ankle_pitch_joint"
-        ] # Ensure this order matches URDF and action space
+        # self.joint_names_for_actions will now come from self.cfg.robot_params.joint_names_for_actions
+        self.joint_names_for_actions: List[str] = self.cfg.robot_params.joint_names_for_actions
+
 
         # Buffers
         self.phase = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.float32)
@@ -184,50 +155,63 @@ class H1IsaacLabEnv(RLTask):
         # Add ground plane using TerrainImporterCfg from self.cfg
         self.scene.add_terrain(self.cfg.ground_plane)
 
-        # Define H1 robot asset configuration
-        h1_asset_cfg = AssetCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/Asset", # Nested prim path for the asset
-            asset_path=self.cfg.h1_urdf_path,
-            collision_group=-1, # Default collision group
-            # Specify actuator properties if not done globally
-            # Assuming a simple PD controller for all joints for now
-            # More complex actuator models can be defined here.
+        # Define robot asset configuration using robot_params.name for scoping
+        robot_prim_path_root = f"{{ENV_REGEX_NS}}/{self.cfg.robot_params.name}"
+        robot_asset_prim_path = f"{robot_prim_path_root}/Asset"
+
+        robot_asset_cfg = AssetCfg(
+            prim_path=robot_asset_prim_path, # Use dynamically constructed path
+            asset_path=self.cfg.robot_params.urdf_path,
+            collision_group=-1,
             actuators={
                 joint_name: sim_schemas.PDActuatorCfg(
-                    stiffness=self.cfg.stiffness, damping=self.cfg.damping
-                ) for joint_name in self.joint_names_for_actions # Apply to specified joints
+                    stiffness=self.cfg.robot_params.stiffness.get(joint_name, self.cfg.robot_params.stiffness.get("default", 0.0)),
+                    damping=self.cfg.robot_params.damping.get(joint_name, self.cfg.robot_params.damping.get("default", 0.0))
+                ) for joint_name in self.cfg.robot_params.joint_names_for_actions
             }
         )
 
-        h1_robot_cfg = RobotCfg(
-            prim_path="{ENV_REGEX_NS}/Robot",
-            asset_cfg=h1_asset_cfg,
+        robot_cfg_instance = RobotCfg(
+            prim_path=robot_prim_path_root, # Use dynamically constructed path
+            asset_cfg=robot_asset_cfg,
             init_state=RobotCfg.InitialStateCfg(
-                pos=(0.0, 0.0, self.cfg.base_height_target + 0.05), # Start slightly above target
+                pos=(0.0, 0.0, self.cfg.robot_params.base_height_target + 0.05),
                 rot=(1.0, 0.0, 0.0, 0.0), # Quaternion (w,x,y,z)
-                joint_pos={name: self.cfg.default_joint_angles[name] for name in self.joint_names_for_actions}
+                joint_pos={name: self.cfg.robot_params.default_joint_angles[name] for name in self.cfg.robot_params.joint_names_for_actions} # Use new field
             ),
-            # Define contact sensors for feet
-            # These prim paths must match the URDF link names
-            contact_sensors={
-                "left_foot": ContactSensorCfg(prim_path="{PRIM_PATH}/left_ankle_roll_link", history_length=3, track_air_time=True, threshold=0.1), # Or left_lower_leg / foot link
-                "right_foot": ContactSensorCfg(prim_path="{PRIM_PATH}/right_ankle_roll_link", history_length=3, track_air_time=True, threshold=0.1), # Or right_lower_leg / foot link
-                "base": ContactSensorCfg(prim_path="{PRIM_PATH}/pelvis_link", threshold=0.1) # For base collision detection
-            },
+            # Define contact sensors based on robot_params
+            # The paths in contact_sensor_prim_names_and_paths are relative to the robot's asset prim path (e.g. "{PRIM_PATH}/left_ankle_roll_link")
+            # but RobotCfg prepends its own prim_path to the sensor path, so we need to make sure paths are what ContactSensorCfg expects.
+            # ContactSensorCfg prim_path is relative to the scene, e.g. {ENV_REGEX_NS}/{robot_name}/link_name
+            # So, the path in contact_sensor_prim_names_and_paths should be the full path from the robot's root.
+            # Example: if robot_params.contact_sensor_prim_names_and_paths = {"foot": "/foot_link"}
+            # Then ContactSensorCfg path should be robot_prim_path_root + "/foot_link"
+            contact_sensors_cfg_dict = {}
+            for name, relative_path in self.cfg.robot_params.contact_sensor_prim_names_and_paths.items():
+                # Ensure relative_path starts with '/'
+                full_sensor_path = robot_prim_path_root + (relative_path if relative_path.startswith("/") else "/" + relative_path)
+                contact_sensors_cfg_dict[name] = ContactSensorCfg(
+                    prim_path=full_sensor_path,
+                    history_length=3, # Default, can be parameterized if needed
+                    track_air_time=True, # Default, can be parameterized
+                    threshold=0.1 # Default, can be parameterized
+                )
+            robot_cfg_instance.contact_sensors = contact_sensors_cfg_dict
+
         )
         # Instantiate and add robot to the scene
-        self.robot = Robot(cfg=h1_robot_cfg)
-        self.scene.add_asset("robot", self.robot)
+        self.robot = Robot(cfg=robot_cfg_instance)
+        self.scene.add_asset(self.cfg.robot_params.name, self.robot) # Use robot name as asset key
 
         # Post-addition: ensure default_joint_angles_tensor is ordered correctly
         # This requires the robot to be loaded to access its joint names and order
-        # We assume self.joint_names_for_actions is the correct order for actions.
+        # We assume self.joint_names_for_actions (now from robot_params) is the correct order for actions.
         # The Robot class stores joint data in the order of `robot.meta_info.joint_names`.
         # We need to map our `default_joint_angles` (from config, by name) to a tensor
         # that matches the robot's internal joint order for relevant DoFs.
 
         # Create a mapping from configured joint names to their values
-        default_joint_angles_map = self.cfg.default_joint_angles
+        default_joint_angles_map = self.cfg.robot_params.default_joint_angles # Use new field
 
         # Initialize a tensor for default joint angles based on the robot's DoF order for *actuated* joints
         # This ensures that when we later use `robot.data.joint_pos`, the subtraction is correct.
@@ -326,7 +310,7 @@ class H1IsaacLabEnv(RLTask):
         self.obs_buf = torch.cat(obs_list, dim=-1)
 
         # Verify observation dimension
-        expected_obs_dim = self.cfg.num_observations
+        expected_obs_dim = self.cfg.robot_params.num_observations # Use new field
         if self.obs_buf.shape[1] != expected_obs_dim:
              print(f"Warning: Observation dimension mismatch! Expected {expected_obs_dim}, got {self.obs_buf.shape[1]}")
              # Print dimensions of each component for debugging
@@ -370,7 +354,7 @@ class H1IsaacLabEnv(RLTask):
         reward_orientation = torch.sum(torch.square(projected_gravity[:, :2]), dim=1) * self.cfg.reward_scales.orientation
 
         # Base height penalty
-        reward_base_height = torch.square(root_pos_w[:, 2] - self.cfg.base_height_target) * self.cfg.reward_scales.base_height
+        reward_base_height = torch.square(root_pos_w[:, 2] - self.cfg.robot_params.base_height_target) * self.cfg.reward_scales.base_height # Use new field
 
         # Action rate penalty (difference between current and previous actions)
         reward_action_rate = torch.sum(torch.square(self.previous_actions_buf - self.actions_buf_for_logging), dim=1) * self.cfg.reward_scales.action_rate
@@ -488,11 +472,19 @@ class H1IsaacLabEnv(RLTask):
         root_pos_w = self.robot.data.root_pos_w
 
         # Base height termination
-        terminated_base_height = root_pos_w[:, 2] < self.cfg.early_termination.base_height_lower_limit
+        terminated_base_height = root_pos_w[:, 2] < self.cfg.robot_params.early_termination_base_height_lower_limit # Use new field
 
         # Base contact termination
-        base_contact_sensor_data = self.robot.contact_sensors["base"].data.net_contact_force_w_norm
-        terminated_base_contact = (base_contact_sensor_data > 0.1) & self.cfg.early_termination.base_contact
+        # Iterate through prim paths defined in robot_params for early termination base contact
+        # These paths are keys to the contact_sensors map created in _setup_scene
+        terminated_base_contact = torch.zeros_like(terminated_base_height, dtype=torch.bool) # Initialize to false
+        for sensor_key in self.cfg.robot_params.early_termination_base_contact_prim_paths:
+            if sensor_key in self.robot.contact_sensors:
+                 contact_data = self.robot.contact_sensors[sensor_key].data.net_contact_force_w_norm
+                 terminated_base_contact |= (contact_data > 0.1) # Assuming threshold of 0.1 for contact
+            else:
+                # This warning is important for debugging configuration issues.
+                print(f"Warning: Early termination contact sensor key '{sensor_key}' defined in robot_params.early_termination_base_contact_prim_paths was not found in the robot's initialized contact_sensors.")
 
         # Combine custom terminations
         custom_terminations = terminated_base_height | terminated_base_contact
@@ -517,25 +509,58 @@ if __name__ == "__main__":
     # print("Attempting to launch Isaac Sim application...")
     # # Note: Running this directly will likely fail without the Isaac Sim environment.
     # # This is for illustrative purposes on how one might test the env.
-    # app_launcher = AppLauncher(headless=False) # Use False for GUI, True for headless
+    # app_launcher = AppLauncher(headless=True) # Use False for GUI, True for headless
     # simulation_app = app_launcher.app
 
     # # Create environment configuration
-    # env_cfg = H1IsaacLabEnvCfg()
+    # env_cfg = RobotIsaacLabEnvCfg()
     # env_cfg.num_envs = 3 # Small number for testing
 
+    # # Example: Populate robot_params for a hypothetical robot (e.g., H1)
+    # # Note: Actual URDF/resource paths would need to be valid.
+    # example_robot_params = RobotParamsCfg(
+    #     name="MyRobot", # Generic name for prim scoping
+    #     urdf_path="path/to/your/robot.urdf", # Replace with actual path if testing
+    #     num_actions=10,
+    #     num_observations=41,
+    #     action_scale=0.25,
+    #     default_joint_angles={
+    #         "joint1": 0.0, "joint2": 0.0, "joint3": -0.52, # Example joint names
+    #         "joint4": 1.05, "joint5": -0.52,
+    #         "joint6": 0.0, "joint7": 0.0, "joint8": -0.52,
+    #         "joint9": 1.05, "joint10": -0.52,
+    #     },
+    #     joint_names_for_actions=[
+    #         "joint1", "joint2", "joint3", "joint4", "joint5",
+    #         "joint6", "joint7", "joint8", "joint9", "joint10"
+    #     ],
+    #     stiffness={"default": 40.0},
+    #     damping={"default": 1.0},
+    #     base_height_target=0.42,
+    #     contact_sensor_prim_names_and_paths={
+    #         # Paths should be relative to the robot's root prim after it's added to the scene
+    #         # e.g., if robot is at /World/MyRobot, sensor path /left_foot_link becomes /World/MyRobot/left_foot_link
+    #         "left_foot_sensor": "/left_foot_link",
+    #         "right_foot_sensor": "/right_foot_link",
+    #         "base_collision_sensor": "/pelvis_link"
+    #     },
+    #     early_termination_base_height_lower_limit=0.15,
+    #     # These keys must match the keys in contact_sensor_prim_names_and_paths
+    #     early_termination_base_contact_prim_paths=["base_collision_sensor"]
+    # )
+    # env_cfg.robot_params = example_robot_params
+
     # # Create the simulation context (usually handled by RLTask or a wrapper)
-    # sim_context = SimulationContext(
+    # sim = SimulationContext(
     #     sim_params=sim_schemas.SimCfg(dt=0.01, use_gpu_pipeline=True, device="cuda:0"),
     #     simulation_app=simulation_app
     # )
-
     # print("Simulation context created.")
 
     # try:
     #     # Instantiate the environment
-    #     env = H1IsaacLabEnv(cfg=env_cfg, simulation_app=simulation_app) # Pass app if RLTask needs it
-    #     print(f"Environment '{H1IsaacLabEnv.__name__}' created successfully.")
+    #     env = RobotIsaacLabEnv(cfg=env_cfg, sim_params=sim.get_physics_dt()) # Pass sim_params if needed by RLTask
+    #     print(f"Environment '{RobotIsaacLabEnv.__name__}' created successfully.")
     #     print(f"Observation space: {env.observation_space}")
     #     print(f"Action space: {env.action_space}")
 
@@ -557,3 +582,84 @@ if __name__ == "__main__":
     #     print("Closing Isaac Sim application.")
     #     simulation_app.close()
     pass # Main guard for actual execution
+
+# --- Pre-defined Robot Parameter Configurations ---
+
+h1_joint_names_for_actions = [
+    "left_hip_yaw_joint", "left_hip_roll_joint", "left_hip_pitch_joint", "left_knee_joint", "left_ankle_joint",
+    "right_hip_yaw_joint", "right_hip_roll_joint", "right_hip_pitch_joint", "right_knee_joint", "right_ankle_joint"
+]
+
+h1_default_joint_angles_gym_order = { # Simulating H1RoughCfg.init_state.default_joint_angles
+    "left_hip_yaw": 0.0, "left_hip_roll": 0.0, "left_hip_pitch": -0.52, "left_knee": 1.05, "left_ankle": -0.52,
+    "right_hip_yaw": 0.0, "right_hip_roll": 0.0, "right_hip_pitch": -0.52, "right_knee": 1.05, "right_ankle": -0.52,
+}
+
+h1_stiffness_gym = {'hip_yaw': 150.0, 'hip_roll': 150.0, 'hip_pitch': 200.0, 'knee': 200.0, 'ankle': 40.0}
+h1_damping_gym = {'hip_yaw': 3.0, 'hip_roll': 3.0, 'hip_pitch': 4.0, 'knee': 4.0, 'ankle': 0.8}
+
+h1_params_cfg = RobotParamsCfg(
+    name="h1",
+    urdf_path="./resources/robots/h1/urdf/h1.urdf",
+    num_actions=10,
+    num_observations=41,
+    action_scale=0.25,
+    default_joint_angles={name: h1_default_joint_angles_gym_order[name.replace("_joint", "").replace("left_", "").replace("right_", "")] for name in h1_joint_names_for_actions},
+    joint_names_for_actions=h1_joint_names_for_actions,
+    stiffness={name: h1_stiffness_gym[name.replace("_joint", "").replace("left_", "").replace("right_", "").replace("hip_", "hip_").replace("knee", "knee").replace("ankle","ankle")] for name in h1_joint_names_for_actions},
+    damping={name: h1_damping_gym[name.replace("_joint", "").replace("left_", "").replace("right_", "").replace("hip_", "hip_").replace("knee", "knee").replace("ankle","ankle")] for name in h1_joint_names_for_actions},
+    base_height_target=1.05, # H1 specific, was 0.42 in generic template
+    contact_sensor_prim_names_and_paths={
+        "left_foot": "/left_ankle_link", # URDF link name
+        "right_foot": "/right_ankle_link", # URDF link name
+        "base_pelvis": "/pelvis_link" # URDF link name
+    },
+    early_termination_base_height_lower_limit=0.8, # Adjusted for H1's height
+    early_termination_base_contact_prim_paths=["base_pelvis"] # Key from contact_sensor_prim_names_and_paths
+)
+
+
+g1_joint_names_for_actions = [
+    "left_hip_yaw_joint", "left_hip_roll_joint", "left_hip_pitch_joint", "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+    "right_hip_yaw_joint", "right_hip_roll_joint", "right_hip_pitch_joint", "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint"
+]
+
+# Simulating G1RoughCfg.init_state.default_joint_angles (keys are joint names from actions list)
+g1_default_joint_angles_gym_order = {
+    'left_hip_yaw': 0.0, 'left_hip_roll': 0.0, 'left_hip_pitch': -0.52, 'left_knee': 1.05, 'left_ankle_pitch': -0.52, 'left_ankle_roll': 0.0,
+    'right_hip_yaw': 0.0, 'right_hip_roll': 0.0, 'right_hip_pitch': -0.52, 'right_knee': 1.05, 'right_ankle_pitch': -0.52, 'right_ankle_roll': 0.0,
+}
+
+g1_stiffness_gym = {'hip_yaw': 150.0, 'hip_roll': 150.0, 'hip_pitch': 200.0, 'knee': 200.0, 'ankle': 40.0} # Ankle for both pitch and roll
+g1_damping_gym = {'hip_yaw': 3.0, 'hip_roll': 3.0, 'hip_pitch': 4.0, 'knee': 4.0, 'ankle': 0.8} # Ankle for both pitch and roll
+
+
+def map_g1_keys(joint_name: str) -> str:
+    name = joint_name.replace("_joint", "").replace("left_", "").replace("right_", "")
+    if "ankle_pitch" in name or "ankle_roll" in name:
+        return "ankle"
+    return name
+
+g1_params_cfg = RobotParamsCfg(
+    name="g1",
+    urdf_path="./resources/robots/g1_description/g1_12dof.urdf",
+    num_actions=12,
+    num_observations=47,
+    action_scale=0.25,
+    default_joint_angles={name: g1_default_joint_angles_gym_order[name.replace("_joint", "").replace("left_", "").replace("right_", "")] for name in g1_joint_names_for_actions},
+    joint_names_for_actions=g1_joint_names_for_actions,
+    stiffness={name: g1_stiffness_gym[map_g1_keys(name)] for name in g1_joint_names_for_actions},
+    damping={name: g1_damping_gym[map_g1_keys(name)] for name in g1_joint_names_for_actions},
+    base_height_target=0.78, # G1 specific
+    contact_sensor_prim_names_and_paths={
+        "left_foot": "/left_ankle_roll_link", # URDF link name
+        "right_foot": "/right_ankle_roll_link", # URDF link name
+        "base_pelvis": "/pelvis_link" # URDF link name
+    },
+    early_termination_base_height_lower_limit=0.5, # Adjusted for G1's height
+    early_termination_base_contact_prim_paths=["base_pelvis"] # Key from contact_sensor_prim_names_and_paths
+)
+
+# --- Pre-defined Environment Configurations ---
+h1_env_cfg = RobotIsaacLabEnvCfg(robot_params=h1_params_cfg)
+g1_env_cfg = RobotIsaacLabEnvCfg(robot_params=g1_params_cfg)
